@@ -1,0 +1,14 @@
+{
+  "name": "sattrakr-server",
+  "version": "1.0.0",
+  "description": "Small backend for the SatTrakR app: TLE cache, device pings, events, stations map",
+  "main": "server.js",
+  "scripts": {
+    "build": "echo build",
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}
