@@ -145,10 +145,21 @@ async function getFrom(urls, asJson) {
 }
 const mirrors = (u) => [u, u.replace('https://celestrak.org', 'https://celestrak.com')];
 async function fetchSourceText(key) {
-  if (key === 'meteor') { // CelesTrak JSON only
-    const list = await getFrom(mirrors(SOURCES.meteor), true);
-    if (!Array.isArray(list) || !list.length) throw new Error('no Meteor data');
-    return ommListToText(list);
+  if (key === 'meteor') { // CelesTrak first, then SatNOGS (looked up by catalog number: METEOR-M2 3 = 57166, METEOR-M2 4 = 59051)
+    try {
+      const list = await getFrom(mirrors(SOURCES.meteor), true);
+      if (Array.isArray(list) && list.length) return ommListToText(list);
+    } catch (e) { console.log('Meteor from CelesTrak failed, trying SatNOGS'); }
+    let out = '';
+    for (const id of [57166, 59051]) {
+      try {
+        const raw = await getFrom(['https://db.satnogs.org/api/tle/?norad_cat_id=' + id + '&format=json'], true);
+        const t = (Array.isArray(raw) ? raw : (raw && raw.results) || [])[0];
+        if (t && t.tle1 && t.tle2) out += '\n' + String(t.tle0 || '').replace(/^0\s+/, '') + '\n' + String(t.tle1).trim() + '\n' + String(t.tle2).trim();
+      } catch (e) { /* skip this one */ }
+    }
+    if (!/^1 /m.test(out)) throw new Error('no Meteor data from CelesTrak or SatNOGS');
+    return out;
   }
   if (key === 'celestrak') {
     try {
