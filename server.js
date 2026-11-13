@@ -129,23 +129,35 @@ function mergedTle() {
 }
 const tleUpdated = () => Math.max(0, ...['pe0sat', 'celestrak'].map((k) => (tle[k] ? tle[k].t : 0)));
 const CELESTRAK_JSON = process.env.CELESTRAK_JSON_URL || 'https://celestrak.org/NORAD/elements/gp.php?GROUP=amateur&FORMAT=json';
+// Why a fetch failed, in a few words (Node hides the real reason in e.cause).
+const why = (e) => e.message + (e.cause ? ' [' + (e.cause.code || e.cause.message) + ']' : '');
+// Try each address in turn until one answers. CelesTrak has two domain names, so if one is blocked the other may still work.
+async function getFrom(urls, asJson) {
+  let last;
+  for (const u of urls) {
+    try {
+      const r = await fetch(u, { signal: AbortSignal.timeout(20000), headers: { 'User-Agent': 'SatTrakR/1.0 (amateur radio satellite tracker; +https://sattrakr.netlify.app)' } });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return asJson ? await r.json() : await r.text();
+    } catch (e) { last = e; console.log('fetch failed for ' + u.slice(0, 70) + ' : ' + why(e)); }
+  }
+  throw last;
+}
+const mirrors = (u) => [u, u.replace('https://celestrak.org', 'https://celestrak.com')];
 async function fetchSourceText(key) {
   if (key === 'meteor') { // CelesTrak JSON only
-    const r = await fetch(SOURCES.meteor, { signal: AbortSignal.timeout(20000) });
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    const list = await r.json();
+    const list = await getFrom(mirrors(SOURCES.meteor), true);
     if (!Array.isArray(list) || !list.length) throw new Error('no Meteor data');
     return ommListToText(list);
   }
   if (key === 'celestrak') {
     try {
-      const r = await fetch(CELESTRAK_JSON, { signal: AbortSignal.timeout(20000) });
-      if (r.ok) { const list = await r.json(); if (Array.isArray(list) && list.length > 5) return ommListToText(list); }
-    } catch (e) { console.log('CelesTrak JSON failed, using the TLE address: ' + e.message); }
+      const list = await getFrom(mirrors(CELESTRAK_JSON), true);
+      if (Array.isArray(list) && list.length > 5) return ommListToText(list);
+    } catch (e) { console.log('CelesTrak JSON failed, using the TLE address'); }
+    return getFrom(mirrors(SOURCES.celestrak), false);
   }
-  const r = await fetch(SOURCES[key], { signal: AbortSignal.timeout(20000) });
-  if (!r.ok) throw new Error('HTTP ' + r.status);
-  return r.text();
+  return getFrom([SOURCES[key]], false);
 }
 async function refreshSource(key, force) {
   if (!force && Date.now() - (lastTry[key] || 0) < 60000) return 'skipped';
@@ -157,7 +169,7 @@ async function refreshSource(key, force) {
     try { fs.writeFileSync(TLE_FILE, JSON.stringify(tle)); } catch {}
     return 'ok';
   } catch (e) {
-    console.log(`TLE refresh ${key} failed: ${e.message}`);
+    console.log(`TLE refresh ${key} failed: ${why(e)}`);
     return 'failed';
   }
 }
