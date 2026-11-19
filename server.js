@@ -370,6 +370,7 @@ http.createServer(async (req, res) => {
       if (b.action === 'delete' && m) db.chat.msgs = db.chat.msgs.filter((x) => x !== m);
       else if (b.action === 'hide' && m) m.hidden = true;
       else if (b.action === 'restore' && m) { m.hidden = false; m.reports = []; }
+      else if ((b.action === 'ban_call' || b.action === 'ban_dev') && m && isReserved(m.call)) return send(res, 400, { error: 'cannot ban the moderator' });
       else if (b.action === 'ban_call' && m) db.chat.bans['c:' + m.call] = Date.now();
       else if (b.action === 'ban_dev' && m) db.chat.bans['d:' + m.dev] = Date.now();
       else if (b.action === 'unban') delete db.chat.bans[String(b.target || '')];
