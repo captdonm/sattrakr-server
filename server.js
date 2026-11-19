@@ -216,6 +216,10 @@ const readJson = (req) => new Promise((resolve, reject) => {
 const ADMIN_KEY = process.env.ADMIN_KEY || '';
 const CHAT_FREE_LIMIT = Number(process.env.CHAT_FREE_LIMIT) || 0;
 db.chat = Object.assign({ seq: 0, msgs: [], bans: {}, counts: {}, last: {} }, db.chat || {});
+// Reserved callsigns (W8CPT, also W8CPT/P etc.): only the moderator, who sends ADMIN_KEY, can chat or show on the map under them.
+const RESERVED = (process.env.RESERVED_CALLS || 'W8CPT').toUpperCase().split(',').map((x) => x.trim()).filter(Boolean);
+const isReserved = (c) => String(c).toUpperCase().split('/').some((part) => RESERVED.includes(part));
+const isAdmin = (k) => !!ADMIN_KEY && k === ADMIN_KEY;
 const ADMIN_HTML = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SatTrakR chat moderation</title>
 <style>body{font:15px system-ui;margin:0;background:#111;color:#eee}header{padding:12px;background:#222;position:sticky;top:0}.m{padding:10px 12px;border-bottom:1px solid #333}.m.h{background:#3a1a1a}.c{color:#ffd54a;font-weight:700}.t{color:#888;font-size:12px}button{margin:6px 6px 0 0;padding:6px 10px;border:0;border-radius:6px;background:#345;color:#fff}button.d{background:#a33}</style>
 <header><b>Chat moderation</b> <button id="rf">Refresh</button> <span id="bn" class="t"></span></header><div id="l"></div>
@@ -262,10 +266,12 @@ http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && p === '/stats/ping') {
       const b = await readJson(req);
-      const id = String(b.device_id || ''), call = String(b.callsign || '').trim().toUpperCase(), grid = String(b.grid || '').trim();
+      const id = String(b.device_id || ''), grid = String(b.grid || '').trim();
+      let call = String(b.callsign || '').trim().toUpperCase();
       if (id.length < 3 || id.length > 80) return send(res, 400, { error: 'device_id must be 3-80 characters' });
       if (!CALL_RE.test(call)) return send(res, 400, { error: 'callsign: letters, numbers and / only, up to 12' });
       if (grid && !GRID_RE.test(grid)) return send(res, 400, { error: 'grid must look like EN82 or EN82ab' });
+      if (isReserved(call) && !isAdmin(b.admin_key)) call = '';
       const d = db.devices[id] || (db.devices[id] = { first: now, pings: 0 });
       d.last = now; d.callsign = call; d.grid = grid.toUpperCase(); d.pings += 1;
       db.pings += 1; touch();
@@ -321,11 +327,13 @@ http.createServer(async (req, res) => {
       if (id.length < 3 || id.length > 80) return send(res, 400, { error: 'bad device' });
       if (call.length < 3 || !CALL_RE.test(call)) return send(res, 400, { error: 'Enter your callsign in Settings first.' });
       if (!text) return send(res, 400, { error: 'Type a message first.' });
-      if (db.chat.bans['d:' + id] || db.chat.bans['c:' + call]) return send(res, 403, { error: 'You have been blocked from chat.' });
+      const adm = isAdmin(b.admin_key);
+      if (isReserved(call) && !adm) return send(res, 403, { error: 'reserved', message: 'That callsign is reserved for the moderator.' });
+      if (!adm && (db.chat.bans['d:' + id] || db.chat.bans['c:' + call])) return send(res, 403, { error: 'You have been blocked from chat.' });
       const used = db.chat.counts[id] || 0;
-      if (CHAT_FREE_LIMIT > 0 && !b.paid && used >= CHAT_FREE_LIMIT) return send(res, 402, { error: 'limit', limit: CHAT_FREE_LIMIT });
+      if (!adm && CHAT_FREE_LIMIT > 0 && !b.paid && used >= CHAT_FREE_LIMIT) return send(res, 402, { error: 'limit', limit: CHAT_FREE_LIMIT });
       const last = db.chat.last[id] || 0;
-      if (now - last < 10000) return send(res, 429, { error: 'Wait a few seconds between messages.' });
+      if (!adm && now - last < 10000) return send(res, 429, { error: 'Wait a few seconds between messages.' });
       db.chat.last[id] = now; db.chat.counts[id] = used + 1;
       const m = { id: ++db.chat.seq, t: now, call, dev: id, text, reports: [], hidden: false };
       db.chat.msgs.push(m);
@@ -341,6 +349,10 @@ http.createServer(async (req, res) => {
       if (m.reports.length >= 3) m.hidden = true; // auto-hide until you review it
       touch();
       return send(res, 200, { ok: true });
+    }
+    if (p === '/admin/check' && req.method === 'POST') {
+      const b = await readJson(req);
+      return isAdmin(b.key) ? send(res, 200, { ok: true }) : send(res, 403, { error: 'forbidden' });
     }
     if (p === '/admin/chat' && req.method === 'GET') {
       if (!ADMIN_KEY || new URL(req.url, 'http://x').searchParams.get('key') !== ADMIN_KEY) return send(res, 403, 'Forbidden', 'text/plain');
