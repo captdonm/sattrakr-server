@@ -6,6 +6,7 @@
 //   GET  /stats               counters
 //   POST /stats/ping          {device_id, callsign, grid}
 //   POST /stats/event         {kind, device_id}
+//   GET  /chat, POST /chat/send, /chat/report, GET /chat/status   public chat; moderation page: /admin/chat?key=ADMIN_KEY
 //   GET  /stats/map           stations seen in the last 30 days (4-character grid squares only)
 const http = require('http');
 const fs = require('fs');
@@ -210,6 +211,29 @@ const readJson = (req) => new Promise((resolve, reject) => {
   req.on('error', reject);
 });
 
+// ---------- public chat storage + admin page ----------
+// Env vars (Render): ADMIN_KEY = a long secret for /admin/chat?key=..., CHAT_FREE_LIMIT = free messages per install (0 = unlimited, the default).
+const ADMIN_KEY = process.env.ADMIN_KEY || '';
+const CHAT_FREE_LIMIT = Number(process.env.CHAT_FREE_LIMIT) || 0;
+db.chat = Object.assign({ seq: 0, msgs: [], bans: {}, counts: {}, last: {} }, db.chat || {});
+const ADMIN_HTML = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SatTrakR chat moderation</title>
+<style>body{font:15px system-ui;margin:0;background:#111;color:#eee}header{padding:12px;background:#222;position:sticky;top:0}.m{padding:10px 12px;border-bottom:1px solid #333}.m.h{background:#3a1a1a}.c{color:#ffd54a;font-weight:700}.t{color:#888;font-size:12px}button{margin:6px 6px 0 0;padding:6px 10px;border:0;border-radius:6px;background:#345;color:#fff}button.d{background:#a33}</style>
+<header><b>Chat moderation</b> <button id="rf">Refresh</button> <span id="bn" class="t"></span></header><div id="l"></div>
+<script>
+const key=new URLSearchParams(location.search).get('key');
+const post=(u,b)=>fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.assign({key},b))}).then(r=>r.json());
+async function load(){const r=await post('/admin/chat/list',{});const l=document.getElementById('l');l.textContent='';
+ const bans=Object.keys(r.bans||{});const bn=document.getElementById('bn');bn.textContent=bans.length?'Banned: ':'';
+ bans.forEach(b=>{const x=document.createElement('button');x.textContent='Unban '+b;x.onclick=async()=>{await post('/admin/chat/action',{action:'unban',target:b});load()};bn.appendChild(x)});
+ (r.msgs||[]).forEach(m=>{const d=document.createElement('div');d.className='m'+(m.hidden?' h':'');
+  const h=document.createElement('div');const c=document.createElement('span');c.className='c';c.textContent=m.call;h.appendChild(c);
+  const t=document.createElement('span');t.className='t';t.textContent='  '+new Date(m.t).toLocaleString()+'  reports: '+m.reports.length+(m.hidden?'  HIDDEN':'');h.appendChild(t);d.appendChild(h);
+  const p=document.createElement('div');p.textContent=m.text;d.appendChild(p);
+  [['delete','Delete','d'],['hide','Hide',''],['restore','Restore',''],['ban_call','Ban callsign','d'],['ban_dev','Ban device','d']].forEach(a=>{const b=document.createElement('button');b.textContent=a[1];if(a[2])b.className=a[2];b.onclick=async()=>{await post('/admin/chat/action',{action:a[0],id:m.id});load()};d.appendChild(b)});
+  l.appendChild(d)})}
+document.getElementById('rf').onclick=load;load();setInterval(load,20000);
+</script>`;
+
 // ---------- routes ----------
 http.createServer(async (req, res) => {
   try {
@@ -278,6 +302,69 @@ http.createServer(async (req, res) => {
         .filter((d) => d.grid && now - d.last < MAP_DAYS * 86400e3)
         .map((d) => { const g4 = d.grid.slice(0, 4); const c = gridCenter4(g4); return { callsign: d.callsign || '', grid: g4, lat: c.lat, lon: c.lon, last_seen: new Date(d.last).toISOString() }; });
       return send(res, 200, { count: stations.length, stations });
+    }
+
+    // ---------- public chat ----------
+    if (p === '/chat' && req.method === 'GET') {
+      const since = Number(new URL(req.url, 'http://x').searchParams.get('since')) || 0;
+      const msgs = db.chat.msgs.filter((m) => !m.hidden && m.id > since).slice(-200).map((m) => ({ id: m.id, t: m.t, call: m.call, text: m.text }));
+      return send(res, 200, { msgs });
+    }
+    if (p === '/chat/status' && req.method === 'GET') {
+      const id = String(new URL(req.url, 'http://x').searchParams.get('device_id') || '');
+      return send(res, 200, { sent: db.chat.counts[id] || 0, limit: CHAT_FREE_LIMIT, banned: !!db.chat.bans['d:' + id] });
+    }
+    if (p === '/chat/send' && req.method === 'POST') {
+      const b = await readJson(req);
+      const id = String(b.device_id || ''), call = String(b.callsign || '').trim().toUpperCase();
+      const text = String(b.text || '').replace(/\s+/g, ' ').trim().slice(0, 280);
+      if (id.length < 3 || id.length > 80) return send(res, 400, { error: 'bad device' });
+      if (call.length < 3 || !CALL_RE.test(call)) return send(res, 400, { error: 'Enter your callsign in Settings first.' });
+      if (!text) return send(res, 400, { error: 'Type a message first.' });
+      if (db.chat.bans['d:' + id] || db.chat.bans['c:' + call]) return send(res, 403, { error: 'You have been blocked from chat.' });
+      const used = db.chat.counts[id] || 0;
+      if (CHAT_FREE_LIMIT > 0 && !b.paid && used >= CHAT_FREE_LIMIT) return send(res, 402, { error: 'limit', limit: CHAT_FREE_LIMIT });
+      const last = db.chat.last[id] || 0;
+      if (now - last < 10000) return send(res, 429, { error: 'Wait a few seconds between messages.' });
+      db.chat.last[id] = now; db.chat.counts[id] = used + 1;
+      const m = { id: ++db.chat.seq, t: now, call, dev: id, text, reports: [], hidden: false };
+      db.chat.msgs.push(m);
+      if (db.chat.msgs.length > 2000) db.chat.msgs.splice(0, db.chat.msgs.length - 2000);
+      touch();
+      return send(res, 200, { ok: true, id: m.id, sent: used + 1 });
+    }
+    if (p === '/chat/report' && req.method === 'POST') {
+      const b = await readJson(req);
+      const id = String(b.device_id || ''), m = db.chat.msgs.find((x) => x.id === Number(b.id));
+      if (!m || id.length < 3) return send(res, 404, { error: 'not found' });
+      if (!m.reports.includes(id)) m.reports.push(id);
+      if (m.reports.length >= 3) m.hidden = true; // auto-hide until you review it
+      touch();
+      return send(res, 200, { ok: true });
+    }
+    if (p === '/admin/chat' && req.method === 'GET') {
+      if (!ADMIN_KEY || new URL(req.url, 'http://x').searchParams.get('key') !== ADMIN_KEY) return send(res, 403, 'Forbidden', 'text/plain');
+      return send(res, 200, ADMIN_HTML, 'text/html');
+    }
+    if (p === '/admin/chat/list' && req.method === 'POST') {
+      const b = await readJson(req);
+      if (!ADMIN_KEY || b.key !== ADMIN_KEY) return send(res, 403, { error: 'forbidden' });
+      return send(res, 200, { msgs: db.chat.msgs.slice(-300).reverse(), bans: db.chat.bans });
+    }
+    if (p === '/admin/chat/action' && req.method === 'POST') {
+      const b = await readJson(req);
+      if (!ADMIN_KEY || b.key !== ADMIN_KEY) return send(res, 403, { error: 'forbidden' });
+      const m = db.chat.msgs.find((x) => x.id === Number(b.id));
+      if (b.action === 'delete' && m) db.chat.msgs = db.chat.msgs.filter((x) => x !== m);
+      else if (b.action === 'hide' && m) m.hidden = true;
+      else if (b.action === 'restore' && m) { m.hidden = false; m.reports = []; }
+      else if (b.action === 'ban_call' && m) db.chat.bans['c:' + m.call] = Date.now();
+      else if (b.action === 'ban_dev' && m) db.chat.bans['d:' + m.dev] = Date.now();
+      else if (b.action === 'unban') delete db.chat.bans[String(b.target || '')];
+      else if (b.action === 'reset_count') delete db.chat.counts[String(b.target || '')];
+      else return send(res, 400, { error: 'bad action' });
+      touch();
+      return send(res, 200, { ok: true });
     }
 
     return send(res, 404, { error: 'not found' });
