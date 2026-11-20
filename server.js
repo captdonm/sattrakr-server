@@ -273,7 +273,7 @@ http.createServer(async (req, res) => {
       if (grid && !GRID_RE.test(grid)) return send(res, 400, { error: 'grid must look like EN82 or EN82ab' });
       if (isReserved(call) && !isAdmin(b.admin_key)) call = '';
       const d = db.devices[id] || (db.devices[id] = { first: now, pings: 0 });
-      d.last = now; d.callsign = call; d.grid = grid.toUpperCase(); d.pings += 1;
+      d.last = now; d.callsign = call; d.grid = grid.toUpperCase(); d.pings += 1; d.src = ['play', 'apk', 'web', 'dev'].includes(b.src) ? b.src : 'unknown';
       db.pings += 1; touch();
       return send(res, 200, { ok: true });
     }
@@ -297,6 +297,8 @@ http.createServer(async (req, res) => {
         active_24h: ds.filter((d) => now - d.last < day).length,
         active_30d: ds.filter((d) => now - d.last < MAP_DAYS * day).length,
         stations: ds.filter((d) => d.grid).length,
+        by_source_30d: ds.filter((d) => now - d.last < MAP_DAYS * day).reduce((o, d) => { const k = d.src || 'unknown'; o[k] = (o[k] || 0) + 1; return o; }, {}),
+        by_source_24h: ds.filter((d) => now - d.last < day).reduce((o, d) => { const k = d.src || 'unknown'; o[k] = (o[k] || 0) + 1; return o; }, {}),
         launches: db.launches,
         pings: db.pings,
         events: db.events,
