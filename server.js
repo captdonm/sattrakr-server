@@ -215,7 +215,7 @@ const readJson = (req) => new Promise((resolve, reject) => {
 // Env vars (Render): ADMIN_KEY = a long secret for /admin/chat?key=..., CHAT_FREE_LIMIT = free messages per install (0 = unlimited, the default).
 const ADMIN_KEY = process.env.ADMIN_KEY || '';
 const CHAT_FREE_LIMIT = Number(process.env.CHAT_FREE_LIMIT) || 0;
-db.chat = Object.assign({ seq: 0, msgs: [], bans: {}, counts: {}, last: {}, log: [], logSeq: 0 }, db.chat || {});
+db.chat = Object.assign({ seq: 0, msgs: [], bans: {}, counts: {}, last: {}, log: [], logSeq: 0, blocks: {} }, db.chat || {});
 // Activity log for the moderator page and app: reports, blocks (the block itself lives on the user's phone) and every moderator action, newest 500 kept.
 function clog(e) { db.chat.log.push({ id: ++db.chat.logSeq, t: Date.now(), ...e }); if (db.chat.log.length > 500) db.chat.log.splice(0, db.chat.log.length - 500); }
 const snip = (x) => String(x || '').slice(0, 80);
@@ -355,10 +355,17 @@ http.createServer(async (req, res) => {
       touch();
       return send(res, 200, { ok: true });
     }
+    if (p === '/chat/blocks' && req.method === 'GET') {
+      const id = String(new URL(req.url, 'http://x').searchParams.get('device_id') || '');
+      return send(res, 200, { blocked: Object.keys(db.chat.blocks[id] || {}) });
+    }
     if (p === '/chat/block' && req.method === 'POST') {
       const b = await readJson(req);
       const id = String(b.device_id || ''), target = String(b.target || '').toUpperCase().slice(0, 12);
       if (id.length < 3 || !target) return send(res, 400, { error: 'bad request' });
+      const mine = (db.chat.blocks[id] = db.chat.blocks[id] || {});
+      if (b.unblock) delete mine[target]; else mine[target] = Date.now();
+      if (!Object.keys(mine).length) delete db.chat.blocks[id];
       clog({ type: b.unblock ? 'unblock' : 'block', by: String(b.callsign || '').toUpperCase().slice(0, 12) || 'someone', dev: id, target });
       touch();
       return send(res, 200, { ok: true });
@@ -372,9 +379,11 @@ http.createServer(async (req, res) => {
       const b = await readJson(req);
       if (!ADMIN_KEY || b.key !== ADMIN_KEY) return send(res, 403, { error: 'forbidden' });
       const e = db.chat.log.find((x) => x.id === Number(b.log_id));
-      if (!e || e.type !== 'mod' || e.undone) return send(res, 400, { error: 'cannot undo' });
+      if (!e || !['mod', 'block', 'unblock'].includes(e.type) || e.undone) return send(res, 400, { error: 'cannot undo' });
       const m = db.chat.msgs.find((x) => x.id === e.mid);
-      if (e.action === 'ban_call' || e.action === 'ban_dev') delete db.chat.bans[e.target];
+      if (e.type === 'block') { const mine = db.chat.blocks[e.dev]; if (mine) { delete mine[e.target]; if (!Object.keys(mine).length) delete db.chat.blocks[e.dev]; } }
+      else if (e.type === 'unblock') { db.chat.blocks[e.dev] = db.chat.blocks[e.dev] || {}; db.chat.blocks[e.dev][e.target] = Date.now(); }
+      else if (e.action === 'ban_call' || e.action === 'ban_dev') delete db.chat.bans[e.target];
       else if (e.action === 'unban') db.chat.bans[e.target] = Date.now();
       else if (e.action === 'hide' && m) m.hidden = false;
       else if (e.action === 'restore' && m) m.hidden = true;
