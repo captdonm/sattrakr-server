@@ -215,7 +215,10 @@ const readJson = (req) => new Promise((resolve, reject) => {
 // Env vars (Render): ADMIN_KEY = a long secret for /admin/chat?key=..., CHAT_FREE_LIMIT = free messages per install (0 = unlimited, the default).
 const ADMIN_KEY = process.env.ADMIN_KEY || '';
 const CHAT_FREE_LIMIT = Number(process.env.CHAT_FREE_LIMIT) || 0;
-db.chat = Object.assign({ seq: 0, msgs: [], bans: {}, counts: {}, last: {} }, db.chat || {});
+db.chat = Object.assign({ seq: 0, msgs: [], bans: {}, counts: {}, last: {}, log: [], logSeq: 0 }, db.chat || {});
+// Activity log for the moderator page and app: reports, blocks (the block itself lives on the user's phone) and every moderator action, newest 500 kept.
+function clog(e) { db.chat.log.push({ id: ++db.chat.logSeq, t: Date.now(), ...e }); if (db.chat.log.length > 500) db.chat.log.splice(0, db.chat.log.length - 500); }
+const snip = (x) => String(x || '').slice(0, 80);
 // Reserved callsigns (W8CPT, also W8CPT/P etc.): only the moderator, who sends ADMIN_KEY, can chat or show on the map under them.
 const RESERVED = (process.env.RESERVED_CALLS || 'W8CPT').toUpperCase().split(',').map((x) => x.trim()).filter(Boolean);
 const isReserved = (c) => String(c).toUpperCase().split('/').some((part) => RESERVED.includes(part));
@@ -273,7 +276,7 @@ http.createServer(async (req, res) => {
       if (grid && !GRID_RE.test(grid)) return send(res, 400, { error: 'grid must look like EN82 or EN82ab' });
       if (isReserved(call) && !isAdmin(b.admin_key)) call = '';
       const d = db.devices[id] || (db.devices[id] = { first: now, pings: 0 });
-      d.last = now; d.callsign = call; d.grid = grid.toUpperCase(); d.pings += 1;
+      d.last = now; d.callsign = call; d.grid = grid.toUpperCase(); d.pings += 1; d.src = ['play', 'apk', 'web', 'dev'].includes(b.src) ? b.src : 'unknown';
       db.pings += 1; touch();
       return send(res, 200, { ok: true });
     }
@@ -297,6 +300,8 @@ http.createServer(async (req, res) => {
         active_24h: ds.filter((d) => now - d.last < day).length,
         active_30d: ds.filter((d) => now - d.last < MAP_DAYS * day).length,
         stations: ds.filter((d) => d.grid).length,
+        by_source_30d: ds.filter((d) => now - d.last < MAP_DAYS * day).reduce((o, d) => { const k = d.src || 'unknown'; o[k] = (o[k] || 0) + 1; return o; }, {}),
+        by_source_24h: ds.filter((d) => now - d.last < day).reduce((o, d) => { const k = d.src || 'unknown'; o[k] = (o[k] || 0) + 1; return o; }, {}),
         launches: db.launches,
         pings: db.pings,
         events: db.events,
@@ -345,8 +350,37 @@ http.createServer(async (req, res) => {
       const b = await readJson(req);
       const id = String(b.device_id || ''), m = db.chat.msgs.find((x) => x.id === Number(b.id));
       if (!m || id.length < 3) return send(res, 404, { error: 'not found' });
-      if (!m.reports.includes(id)) m.reports.push(id);
-      if (m.reports.length >= 3) m.hidden = true; // auto-hide until you review it
+      if (!m.reports.includes(id)) { m.reports.push(id); clog({ type: 'report', by: String(b.callsign || '').toUpperCase().slice(0, 12) || 'someone', dev: id, mid: m.id, call: m.call, text: snip(m.text), count: m.reports.length }); }
+      if (m.reports.length >= 3 && !m.hidden) { m.hidden = true; clog({ type: 'autohide', mid: m.id, call: m.call, text: snip(m.text) }); } // auto-hide until you review it
+      touch();
+      return send(res, 200, { ok: true });
+    }
+    if (p === '/chat/block' && req.method === 'POST') {
+      const b = await readJson(req);
+      const id = String(b.device_id || ''), target = String(b.target || '').toUpperCase().slice(0, 12);
+      if (id.length < 3 || !target) return send(res, 400, { error: 'bad request' });
+      clog({ type: b.unblock ? 'unblock' : 'block', by: String(b.callsign || '').toUpperCase().slice(0, 12) || 'someone', dev: id, target });
+      touch();
+      return send(res, 200, { ok: true });
+    }
+    if (p === '/admin/chat/log' && req.method === 'POST') {
+      const b = await readJson(req);
+      if (!ADMIN_KEY || b.key !== ADMIN_KEY) return send(res, 403, { error: 'forbidden' });
+      return send(res, 200, { log: db.chat.log.slice(-200).reverse(), bans: db.chat.bans });
+    }
+    if (p === '/admin/chat/undo' && req.method === 'POST') {
+      const b = await readJson(req);
+      if (!ADMIN_KEY || b.key !== ADMIN_KEY) return send(res, 403, { error: 'forbidden' });
+      const e = db.chat.log.find((x) => x.id === Number(b.log_id));
+      if (!e || e.type !== 'mod' || e.undone) return send(res, 400, { error: 'cannot undo' });
+      const m = db.chat.msgs.find((x) => x.id === e.mid);
+      if (e.action === 'ban_call' || e.action === 'ban_dev') delete db.chat.bans[e.target];
+      else if (e.action === 'unban') db.chat.bans[e.target] = Date.now();
+      else if (e.action === 'hide' && m) m.hidden = false;
+      else if (e.action === 'restore' && m) m.hidden = true;
+      else if (e.action === 'delete' && e.msg) { if (!db.chat.msgs.some((x) => x.id === e.msg.id)) { db.chat.msgs.push(e.msg); db.chat.msgs.sort((x, y) => x.id - y.id); } }
+      else return send(res, 400, { error: 'cannot undo' });
+      e.undone = Date.now();
       touch();
       return send(res, 200, { ok: true });
     }
@@ -367,13 +401,16 @@ http.createServer(async (req, res) => {
       const b = await readJson(req);
       if (!ADMIN_KEY || b.key !== ADMIN_KEY) return send(res, 403, { error: 'forbidden' });
       const m = db.chat.msgs.find((x) => x.id === Number(b.id));
-      if (b.action === 'delete' && m) db.chat.msgs = db.chat.msgs.filter((x) => x !== m);
-      else if (b.action === 'hide' && m) m.hidden = true;
-      else if (b.action === 'restore' && m) { m.hidden = false; m.reports = []; }
-      else if (b.action === 'ban_call' && m) db.chat.bans['c:' + m.call] = Date.now();
-      else if (b.action === 'ban_dev' && m) db.chat.bans['d:' + m.dev] = Date.now();
-      else if (b.action === 'unban') delete db.chat.bans[String(b.target || '')];
-      else if (b.action === 'reset_count') delete db.chat.counts[String(b.target || '')];
+      const base = m ? { type: 'mod', action: b.action, mid: m.id, call: m.call, text: snip(m.text) } : { type: 'mod', action: b.action };
+      if (b.action === 'delete' && m) { clog({ ...base, msg: m }); db.chat.msgs = db.chat.msgs.filter((x) => x !== m); }
+      else if (b.action === 'hide' && m) { m.hidden = true; clog(base); }
+      else if (b.action === 'restore' && m) { m.hidden = false; m.reports = []; clog(base); }
+      else if (b.action === 'dismiss' && m) { clog({ ...base, count: m.reports.length }); m.reports = []; }
+      else if ((b.action === 'ban_call' || b.action === 'ban_dev') && m && isReserved(m.call)) return send(res, 400, { error: 'cannot ban the moderator' });
+      else if (b.action === 'ban_call' && m) { db.chat.bans['c:' + m.call] = Date.now(); clog({ ...base, target: 'c:' + m.call }); }
+      else if (b.action === 'ban_dev' && m) { db.chat.bans['d:' + m.dev] = Date.now(); clog({ ...base, target: 'd:' + m.dev }); }
+      else if (b.action === 'unban') { const tg = String(b.target || ''); delete db.chat.bans[tg]; clog({ type: 'mod', action: 'unban', target: tg }); }
+      else if (b.action === 'reset_count') { delete db.chat.counts[String(b.target || '')]; clog({ type: 'mod', action: 'reset_count', target: String(b.target || '') }); }
       else return send(res, 400, { error: 'bad action' });
       touch();
       return send(res, 200, { ok: true });
