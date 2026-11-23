@@ -218,6 +218,7 @@ const CHAT_FREE_LIMIT = Number(process.env.CHAT_FREE_LIMIT) || 0;
 db.chat = Object.assign({ seq: 0, msgs: [], bans: {}, counts: {}, last: {}, log: [], logSeq: 0, blocks: {} }, db.chat || {});
 // Activity log for the moderator page and app: reports, blocks (the block itself lives on the user's phone) and every moderator action, newest 500 kept.
 function clog(e) { db.chat.log.push({ id: ++db.chat.logSeq, t: Date.now(), ...e }); if (db.chat.log.length > 500) db.chat.log.splice(0, db.chat.log.length - 500); }
+db.acts = db.acts || []; db.actSeq = db.actSeq || 0; // activation announcements
 const snip = (x) => String(x || '').slice(0, 80);
 // Reserved callsigns (W8CPT, also W8CPT/P etc.): only the moderator, who sends ADMIN_KEY, can chat or show on the map under them.
 const RESERVED = (process.env.RESERVED_CALLS || 'W8CPT').toUpperCase().split(',').map((x) => x.trim()).filter(Boolean);
@@ -390,6 +391,56 @@ http.createServer(async (req, res) => {
       else if (e.action === 'delete' && e.msg) { if (!db.chat.msgs.some((x) => x.id === e.msg.id)) { db.chat.msgs.push(e.msg); db.chat.msgs.sort((x, y) => x.id - y.id); } }
       else return send(res, 400, { error: 'cannot undo' });
       e.undone = Date.now();
+      touch();
+      return send(res, 200, { ok: true });
+    }
+    // ---------- activation announcements: "I will be working this satellite" ----------
+    const ACT_TYPES = ['POTA', 'Rover', 'Home', 'Portable'];
+    const cleanTxt = (x, n) => String(x || '').replace(/[\u0000-\u001f<>]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, n);
+    if (p === '/acts/list' && req.method === 'POST') {
+      const b = await readJson(req);
+      const adm = isAdmin(b.admin_key), id = String(b.device_id || '');
+      db.acts = db.acts.filter((a) => a.when > now - 7 * 86400e3); // drop anything older than a week
+      const list = db.acts.filter((a) => a.when > now - 24 * 3600e3 && !a.hidden).sort((x, y) => x.when - y.when).slice(0, 200)
+        .map((a) => ({ id: a.id, call: a.call, sat: a.sat, loc: a.loc, grid: a.grid, when: a.when, type: a.type, mine: a.dev === id, ...(adm ? { reports: a.reports.length, hidden: a.hidden } : {}) }));
+      return send(res, 200, { acts: list });
+    }
+    if (p === '/acts/post' && req.method === 'POST') {
+      const b = await readJson(req);
+      const id = String(b.device_id || ''), call = String(b.callsign || '').trim().toUpperCase(), adm = isAdmin(b.admin_key);
+      if (id.length < 3 || id.length > 80) return send(res, 400, { error: 'bad device' });
+      if (call.length < 3 || !CALL_RE.test(call)) return send(res, 400, { error: 'Enter your callsign first.' });
+      if (isReserved(call) && !adm) return send(res, 403, { error: 'reserved', message: 'That callsign is reserved for the moderator.' });
+      if (!adm && (db.chat.bans['d:' + id] || db.chat.bans['c:' + call])) return send(res, 403, { error: 'You have been blocked.' });
+      const sat = cleanTxt(b.sat, 40), loc = cleanTxt(b.loc, 40), grid = String(b.grid || '').trim().toUpperCase(), type = String(b.type || '');
+      const when = Date.parse(b.when);
+      if (!sat) return send(res, 400, { error: 'Enter the satellite name.' });
+      if (!loc) return send(res, 400, { error: 'Enter your state or country.' });
+      if (!/^[A-R]{2}[0-9]{2}([A-X]{2})?$/.test(grid)) return send(res, 400, { error: 'Enter a grid square like EN82 or EN82qv.' });
+      if (!ACT_TYPES.includes(type)) return send(res, 400, { error: 'Pick the type of activation.' });
+      if (!Number.isFinite(when) || when < now - 2 * 3600e3 || when > now + 30 * 86400e3) return send(res, 400, { error: 'Pick a UTC date and time from now to 30 days ahead.' });
+      const mine = db.acts.filter((a) => a.dev === id && a.t > now - 86400e3).length;
+      if (!adm && mine >= 5) return send(res, 429, { error: 'You can post up to 5 activations a day.' });
+      const a = { id: ++db.actSeq, t: now, dev: id, call, sat, loc, grid, when, type, reports: [], hidden: false };
+      db.acts.push(a); if (db.acts.length > 600) db.acts.splice(0, db.acts.length - 600);
+      touch();
+      return send(res, 200, { ok: true, id: a.id });
+    }
+    if (p === '/acts/delete' && req.method === 'POST') {
+      const b = await readJson(req);
+      const a = db.acts.find((x) => x.id === Number(b.id)), id = String(b.device_id || ''), adm = isAdmin(b.admin_key);
+      if (!a || (!adm && a.dev !== id)) return send(res, 404, { error: 'not found' });
+      db.acts = db.acts.filter((x) => x !== a);
+      if (adm && a.dev !== id) clog({ type: 'mod', action: 'act_delete', call: a.call, text: a.sat + ' ' + a.grid });
+      touch();
+      return send(res, 200, { ok: true });
+    }
+    if (p === '/acts/report' && req.method === 'POST') {
+      const b = await readJson(req);
+      const a = db.acts.find((x) => x.id === Number(b.id)), id = String(b.device_id || '');
+      if (!a || id.length < 3) return send(res, 404, { error: 'not found' });
+      if (!a.reports.includes(id)) { a.reports.push(id); clog({ type: 'act_report', by: String(b.callsign || '').toUpperCase().slice(0, 12) || 'someone', dev: id, call: a.call, text: snip(a.sat + ' ' + a.grid), count: a.reports.length }); }
+      if (a.reports.length >= 3) a.hidden = true;
       touch();
       return send(res, 200, { ok: true });
     }
