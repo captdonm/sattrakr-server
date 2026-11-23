@@ -402,7 +402,7 @@ http.createServer(async (req, res) => {
       const adm = isAdmin(b.admin_key), id = String(b.device_id || ''), me = String(b.callsign || '').trim().toUpperCase();
       db.acts = db.acts.filter((a) => a.when > now - 7 * 86400e3); // drop anything older than a week
       const list = db.acts.filter((a) => a.when > now - 24 * 3600e3 && !a.hidden).sort((x, y) => x.when - y.when).slice(0, 200)
-        .map((a) => ({ id: a.id, call: a.call, sat: a.sat, loc: a.loc, grid: a.grid, when: a.when, type: a.type, note: a.note || '', mine: adm || a.dev === id || (!!me && !isReserved(me) && a.call === me), ...(adm ? { reports: a.reports.length, hidden: a.hidden } : {}) }));
+        .map((a) => ({ id: a.id, call: a.call, sat: a.sat, loc: a.loc, grid: a.grid, when: a.when, type: a.type, end: a.end || a.when + 10 * 60e3, note: a.note || '', mine: adm || a.dev === id || (!!me && !isReserved(me) && a.call === me), ...(adm ? { reports: a.reports.length, hidden: a.hidden } : {}) }));
       return send(res, 200, { acts: list });
     }
     if (p === '/acts/post' && req.method === 'POST') {
@@ -421,7 +421,7 @@ http.createServer(async (req, res) => {
       if (!Number.isFinite(when) || when < now - 2 * 3600e3 || when > now + 30 * 86400e3) return send(res, 400, { error: 'Pick a UTC date and time from now to 30 days ahead.' });
       const mine = db.acts.filter((a) => a.dev === id && a.t > now - 86400e3).length;
       if (!adm && mine >= 5) return send(res, 429, { error: 'You can post up to 5 activations a day.' });
-      const a = { id: ++db.actSeq, t: now, dev: id, call, sat, loc, grid, when, type, note: cleanTxt(b.note, 140), reports: [], hidden: false };
+      const a = { id: ++db.actSeq, t: now, dev: id, call, sat, loc, grid, when, type, end: (Date.parse(b.end) > when && Date.parse(b.end) <= when + 3 * 3600e3) ? Date.parse(b.end) : when + 10 * 60e3, note: cleanTxt(b.note, 140), reports: [], hidden: false };
       db.acts.push(a); if (db.acts.length > 600) db.acts.splice(0, db.acts.length - 600);
       touch();
       return send(res, 200, { ok: true, id: a.id });
