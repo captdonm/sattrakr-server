@@ -399,10 +399,10 @@ http.createServer(async (req, res) => {
     const cleanTxt = (x, n) => String(x || '').replace(/[\u0000-\u001f<>]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, n);
     if (p === '/acts/list' && req.method === 'POST') {
       const b = await readJson(req);
-      const adm = isAdmin(b.admin_key), id = String(b.device_id || '');
+      const adm = isAdmin(b.admin_key), id = String(b.device_id || ''), me = String(b.callsign || '').trim().toUpperCase();
       db.acts = db.acts.filter((a) => a.when > now - 7 * 86400e3); // drop anything older than a week
       const list = db.acts.filter((a) => a.when > now - 24 * 3600e3 && !a.hidden).sort((x, y) => x.when - y.when).slice(0, 200)
-        .map((a) => ({ id: a.id, call: a.call, sat: a.sat, loc: a.loc, grid: a.grid, when: a.when, type: a.type, note: a.note || '', mine: a.dev === id, ...(adm ? { reports: a.reports.length, hidden: a.hidden } : {}) }));
+        .map((a) => ({ id: a.id, call: a.call, sat: a.sat, loc: a.loc, grid: a.grid, when: a.when, type: a.type, note: a.note || '', mine: adm || a.dev === id || (!!me && !isReserved(me) && a.call === me), ...(adm ? { reports: a.reports.length, hidden: a.hidden } : {}) }));
       return send(res, 200, { acts: list });
     }
     if (p === '/acts/post' && req.method === 'POST') {
@@ -428,8 +428,8 @@ http.createServer(async (req, res) => {
     }
     if (p === '/acts/delete' && req.method === 'POST') {
       const b = await readJson(req);
-      const a = db.acts.find((x) => x.id === Number(b.id)), id = String(b.device_id || ''), adm = isAdmin(b.admin_key);
-      if (!a || (!adm && a.dev !== id)) return send(res, 404, { error: 'not found' });
+      const a = db.acts.find((x) => x.id === Number(b.id)), id = String(b.device_id || ''), adm = isAdmin(b.admin_key), me = String(b.callsign || '').trim().toUpperCase();
+      if (!a || (!adm && a.dev !== id && !(me && !isReserved(me) && a.call === me))) return send(res, 404, { error: 'not found' });
       db.acts = db.acts.filter((x) => x !== a);
       if (adm && a.dev !== id) clog({ type: 'mod', action: 'act_delete', call: a.call, text: a.sat + ' ' + a.grid });
       touch();
