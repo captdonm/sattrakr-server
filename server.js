@@ -253,6 +253,26 @@ http.createServer(async (req, res) => {
 
     if (req.method === 'GET' && (p === '/' || p === '/health')) return send(res, 200, { ok: true, service: 'sattrakr' });
 
+    // PSK Reporter proxy for the web app (browsers are not allowed to call PSK Reporter directly). Cached 2 minutes per grid square.
+    if (req.method === 'GET' && p === '/psk') {
+      const g4 = String(new URL(req.url, 'http://x').searchParams.get('grid') || '').trim().toUpperCase().slice(0, 4);
+      if (!/^[A-R]{2}[0-9]{2}$/.test(g4)) return send(res, 400, { error: 'bad grid' });
+      globalThis.__psk = globalThis.__psk || new Map();
+      const hit = globalThis.__psk.get(g4);
+      if (hit && now - hit.t < 120000) return send(res, 200, hit.xml, 'text/xml');
+      try {
+        const r = await fetch('https://retrieve.pskreporter.info/query?callsign=' + g4 + '&modify=grid&flowStartSeconds=-1800&rptlimit=400&rronly=1', { signal: AbortSignal.timeout(20000), headers: { 'User-Agent': 'SatTrakR/1.0 (amateur radio satellite tracker; +https://sattrakr.netlify.app)' } });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const xml = await r.text();
+        globalThis.__psk.set(g4, { t: now, xml });
+        if (globalThis.__psk.size > 200) globalThis.__psk.delete(globalThis.__psk.keys().next().value);
+        return send(res, 200, xml, 'text/xml');
+      } catch (e) {
+        if (hit) return send(res, 200, hit.xml, 'text/xml'); // PSK Reporter busy: send the last answer we had
+        return send(res, 502, { error: 'PSK Reporter unavailable' });
+      }
+    }
+
     if (req.method === 'GET' && p === '/tle') {
       if (!tleUpdated()) await refreshAll(false);
       else if (now - tleUpdated() > TLE_MAX_AGE_MS) refreshAll(false);
