@@ -262,14 +262,14 @@ http.createServer(async (req, res) => {
       if (hit && now - hit.t < 120000) return send(res, 200, hit.xml, 'text/xml');
       try {
         const r = await fetch('https://retrieve.pskreporter.info/query?callsign=' + g4 + '&modify=grid&flowStartSeconds=-1800&rptlimit=400&rronly=1', { signal: AbortSignal.timeout(20000), headers: { 'User-Agent': 'SatTrakR/1.0 (amateur radio satellite tracker; +https://sattrakr.netlify.app)' } });
-        if (!r.ok) throw new Error('HTTP ' + r.status);
         const xml = await r.text();
+        if (!r.ok || !/<receptionReport|<receptionReports/.test(xml)) throw new Error('HTTP ' + r.status + ' ' + xml.replace(/\s+/g, ' ').slice(0, 200));
         globalThis.__psk.set(g4, { t: now, xml });
         if (globalThis.__psk.size > 200) globalThis.__psk.delete(globalThis.__psk.keys().next().value);
         return send(res, 200, xml, 'text/xml');
       } catch (e) {
         if (hit) return send(res, 200, hit.xml, 'text/xml'); // PSK Reporter busy: send the last answer we had
-        return send(res, 502, { error: 'PSK Reporter unavailable' });
+        return send(res, 502, { error: 'PSK Reporter unavailable', detail: String(e && e.message || e).slice(0, 300) });
       }
     }
 
