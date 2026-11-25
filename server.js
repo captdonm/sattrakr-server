@@ -440,7 +440,7 @@ http.createServer(async (req, res) => {
       if (!ACT_TYPES.includes(type)) return send(res, 400, { error: 'Pick the type of activation.' });
       if (!Number.isFinite(when) || when < now - 2 * 3600e3 || when > now + 30 * 86400e3) return send(res, 400, { error: 'Pick a UTC date and time from now to 30 days ahead.' });
       const mine = db.acts.filter((a) => a.dev === id && a.t > now - 86400e3).length;
-      if (!adm && mine >= 5) return send(res, 429, { error: 'You can post up to 5 activations a day.' });
+      if (!adm && mine >= 12) return send(res, 429, { error: 'You can post up to 12 activations a day.' });
       const a = { id: ++db.actSeq, t: now, dev: id, call, sat, loc, grid, when, type, end: (Date.parse(b.end) > when && Date.parse(b.end) <= when + 3 * 3600e3) ? Date.parse(b.end) : when + 10 * 60e3, note: cleanTxt(b.note, 140), reports: [], hidden: false };
       db.acts.push(a); if (db.acts.length > 600) db.acts.splice(0, db.acts.length - 600);
       touch();
